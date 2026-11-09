@@ -29,6 +29,13 @@
   .msg a { color: #9FD6A9; font-weight: 700; }
   @keyframes bob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
   @media (prefers-reduced-motion: reduce) { .ic { animation: none; } }
+  #pushBar { position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 10px); transform: translate(-50%, -160%); z-index: 5; display: flex; align-items: center; gap: 8px; max-width: calc(100% - 24px); width: max-content;
+    background: #1B191A; color: #fff; border: 2px solid #238A3A; border-radius: 18px; padding: 8px 8px 8px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    font-family: -apple-system, system-ui, sans-serif; font-size: 14px; transition: transform .35s ease; }
+  #pushBar.on { transform: translate(-50%, 0); }
+  #pushBar #pushTxt { line-height: 1.3; }
+  #pushGo { background: #238A3A; color: #fff; border: 0; border-radius: 12px; padding: 9px 12px; font-weight: 700; font-size: 14px; white-space: nowrap; font-family: inherit; }
+  #pushX { background: transparent; color: #C9D2CC; border: 0; font-size: 16px; padding: 6px 8px; font-family: inherit; }
 </style>
 </head>
 <body>
@@ -51,6 +58,72 @@
       frame.addEventListener('load', function () { setTimeout(reveal, 400); });
       setTimeout(function () { if (!shown) document.getElementById('msg').style.display = 'block'; }, 9000);
       frame.src = EXEC + (location.search || '');
+    })();
+  </script>
+  <div id="pushBar" role="dialog" aria-live="polite">
+    <span id="pushTxt">🔔 Get reminders + updates</span>
+    <button id="pushGo">Turn on notifications</button>
+    <button id="pushX" aria-label="Not now">✕</button>
+  </div>
+  <script>
+    (function () {
+      // ---- push notifications (lives on this page; the portal inside the frame can't do it) ----
+      var EXEC = 'https://script.google.com/macros/s/AKfycbyLpOXi5nIZTzGGXE7ZQy14nAot-_JE4xROF3Xq2l_FP6RPRB7RzgvW9OrC1DsSez0l/exec';
+      var bar = document.getElementById('pushBar'), txt = document.getElementById('pushTxt'), go = document.getElementById('pushGo');
+      var token = '', key = '', reg = null;
+      var can = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+      var standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+      var ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
+      function ls(k, v) { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) {} return null; }
+      function b64(bytes) { var s = ''; new Uint8Array(bytes).forEach(function (b) { s += String.fromCharCode(b); }); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+      function unb64(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; var r = atob(s), a = new Uint8Array(r.length); for (var i = 0; i < r.length; i++) a[i] = r.charCodeAt(i); return a; }
+      function show(msg, btn) { txt.textContent = msg; go.style.display = btn ? '' : 'none'; bar.classList.add('on'); }
+      function hide() { bar.classList.remove('on'); }
+      function getKey() { return key ? Promise.resolve(key) : fetch(EXEC + '?vapid=1&_=' + Date.now(), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (j) { key = j.key; return key; }); }
+      function sendSub(sub) {
+        var data = b64(new TextEncoder().encode(JSON.stringify(sub.toJSON ? sub.toJSON() : sub)));
+        return fetch(EXEC + '?pushsub=' + data + '&t=' + encodeURIComponent(token) + '&_=' + Date.now(), { cache: 'no-store' }).then(function (r) { return r.json(); })
+          .then(function (j) { if (!j || !j.ok) throw new Error((j && j.error) || 'Could not save'); ls('caribsa_push_at', String(Date.now())); ls('caribsa_push_who', token.slice(0, 8)); return j; });
+      }
+      if (can) navigator.serviceWorker.register('sw.js').then(function (r) { reg = r; }).catch(function () {});
+      function ready() { return reg ? Promise.resolve(reg) : navigator.serviceWorker.ready; }
+      function check(force) {
+        if (!token) return;
+        if (!can) { if (force) show(ios && !standalone ? 'Add CaribSA to your Home Screen, then open it from the icon to turn on notifications.' : 'This browser can’t get notifications.', false); return; }
+        if (Notification.permission === 'denied') { if (force) show('Notifications are blocked. Turn them on in Settings → Notifications → CaribSA.', false); return; }
+        ready().then(function (r) { return r.pushManager.getSubscription(); }).then(function (sub) {
+          if (sub && Notification.permission === 'granted') {
+            hide();
+            // keep the phone linked to whoever is logged in (re-sync weekly or after a different login)
+            var last = Number(ls('caribsa_push_at') || 0);
+            if (force || ls('caribsa_push_who') !== token.slice(0, 8) || Date.now() - last > 7 * 864e5) sendSub(sub).then(function () { if (force) { show('Notifications are on ✓', false); setTimeout(hide, 2500); } }).catch(function () {});
+            return;
+          }
+          var snooze = Number(ls('caribsa_push_snooze') || 0);
+          if (force || Date.now() > snooze) { getKey().catch(function () {}); show('🔔 Get event reminders + updates', true); }
+        }).catch(function () {});
+      }
+      go.addEventListener('click', function () {
+        // must be called right inside the tap
+        var p = Notification.requestPermission();
+        go.disabled = true; txt.textContent = 'Turning on…';
+        Promise.resolve(p).then(function (perm) {
+          if (perm !== 'granted') throw new Error('You didn’t allow notifications. You can turn them on in Settings → Notifications → CaribSA.');
+          return Promise.all([ready(), getKey()]);
+        }).then(function (x) {
+          return x[0].pushManager.getSubscription().then(function (old) { return old || x[0].pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64(x[1]) }); });
+        }).then(sendSub).then(function () {
+          go.disabled = false; show('Notifications are on ✓', false); setTimeout(hide, 2500);
+        }).catch(function (e) { go.disabled = false; show(e.message || 'That didn’t work. Try again.', false); setTimeout(hide, 6000); });
+      });
+      document.getElementById('pushX').addEventListener('click', function () { ls('caribsa_push_snooze', String(Date.now() + 3 * 864e5)); hide(); });
+      window.addEventListener('message', function (e) {
+        if (!/^https:\/\/([a-z0-9-]+\.)*(googleusercontent\.com|google\.com)$/.test(e.origin)) return;
+        var d = e.data || {};
+        if (d.caribsa === 'session' && d.token) { token = String(d.token); setTimeout(function () { check(false); }, 1500); }
+        else if (d.caribsa === 'showPush') { if (d.token) token = String(d.token); check(true); }
+        else if (d.caribsa === 'logout') { token = ''; hide(); }
+      });
     })();
   </script>
 </body>
